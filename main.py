@@ -1,9 +1,11 @@
 # main.py
 import os
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from sse_starlette.sse import EventSourceResponse
 
 # Import LangChain components
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -30,10 +32,9 @@ def check_api_key(creds: HTTPAuthorizationCredentials = Depends(auth_scheme)):
     return True
 
 # --- Global Objects (Load once, reuse) ---
-# We load the "heavy" models once on startup
 print("--- Loading heavy models (once on startup) ---")
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0, streaming=True) # Enable streaming
 
 # Multi-lingual Prompt Template
 template = """
@@ -53,22 +54,22 @@ Answer (in the same language as the question):
 """
 prompt = PromptTemplate.from_template(template)
 
-PINECONE_INDEX_NAME = "rag-framework" # Your index name
+PINECONE_INDEX_NAME = "rag-framework" 
 
 # --- API ---
 app = FastAPI()
 
-# --- Helper Function for Ingestion ---
-def ingest_url(url: str, namespace: str):
+# --- Helper Function for Ingestion (Async) ---
+async def ingest_url(url: str, namespace: str):
     try:
         print(f"Ingesting {url} into namespace {namespace}...")
         loader = WebBaseLoader(url)
-        docs = loader.load()
+        docs = await loader.aload() # Async load
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = text_splitter.split_documents(docs)
 
-        PineconeVectorStore.from_documents(
+        await PineconeVectorStore.afrom_documents(
             splits, 
             embeddings, 
             index_name=PINECONE_INDEX_NAME,
@@ -83,25 +84,20 @@ def ingest_url(url: str, namespace: str):
 # --- Pydantic Models (Data Contracts) ---
 class ChatRequest(BaseModel):
     question: str
-    namespace: str 
+    namespace: str # e.g., "betvuna" or "other_org"
 
 class UploadRequest(BaseModel):
     url: str
-    namespace: str
+    namespace: str # e.g., "betvuna"
 
-# --- Endpoints ---
-@app.get("/")
-def read_root():
-    return {"Status": "RAG API is running!"}
-
-@app.post("/chat")
-def chat_with_rag(request: ChatRequest):
+# --- Streaming Chat Generator ---
+async def stream_chat(request: ChatRequest):
     """
-    Main chat endpoint. Receives a question and a namespace,
-    returns a grounded answer.
+    Async generator for streaming responses.
+    This keeps the connection alive and bypasses timeouts.
     """
     try:
-        print(f"Chat request for namespace: {request.namespace}")
+        print(f"Streaming chat request for namespace: {request.namespace}")
 
         # 1. Create a VectorStore instance pointing to the *specific namespace*
         vectorstore = PineconeVectorStore(
@@ -114,8 +110,6 @@ def chat_with_rag(request: ChatRequest):
         retriever = vectorstore.as_retriever()
 
         # 3. Build the RAG chain for this request
-        # We re-build the chain object every time, but the heavy
-        # components (llm, prompt, embeddings) are cached globally.
         rag_chain = (
             {"context": retriever, "question": RunnablePassthrough()}
             | prompt
@@ -123,20 +117,35 @@ def chat_with_rag(request: ChatRequest):
             | StrOutputParser()
         )
 
-        response = rag_chain.invoke(request.question)
-        return {"answer": response}
+        # 4. Use .astream() to get chunks as they are generated
+        async for chunk in rag_chain.astream(request.question):
+            if chunk:
+                yield chunk
 
     except Exception as e:
-        print(f"Error during RAG chain invocation: {e}")
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        print(f"Error during RAG stream: {e}")
+        yield f"Error: {str(e)}"
+
+# --- Endpoints ---
+@app.get("/")
+async def read_root():
+    return {"Status": "RAG API is running!"}
+
+@app.post("/chat")
+async def chat_with_rag(request: ChatRequest):
+    """
+    Main chat endpoint. Receives a question and a namespace,
+    and returns a StreamingResponse.
+    """
+    return EventSourceResponse(stream_chat(request))
 
 @app.post("/upload", dependencies=[Depends(check_api_key)])
-def upload_data(request: UploadRequest):
+async def upload_data(request: UploadRequest):
     """
     Secured endpoint for an admin to add new knowledge.
     Requires a Bearer token in the Authorization header.
     """
-    success = ingest_url(request.url, request.namespace)
+    success = await ingest_url(request.url, request.namespace)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to ingest URL.")
 
