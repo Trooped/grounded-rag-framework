@@ -14,47 +14,64 @@ from langchain.schema.output_parser import StrOutputParser
 # Load API keys from environment (Render will provide these)
 load_dotenv() 
 
-# --- Setup ---
-# This setup code will run once when your API server starts on Render
+# --- Global Cache ---
+# We initialize this as None. It will be "lazy loaded"
+# the first time the /chat endpoint is called.
+rag_chain = None
 
-PINECONE_INDEX_NAME = "rag-framework" # Your index name
+def get_rag_chain():
+    """
+    Initializes and returns the RAG chain.
+    Uses a global variable to cache the chain so we don't
+    re-initialize it on every single request.
+    """
+    global rag_chain
 
-# 1. Initialize Embedding Model
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    # If the chain is already initialized, just return it.
+    if rag_chain:
+        return rag_chain
 
-# 2. Initialize Vector Store (the "Retriever")
-# This connects to your existing Pinecone index
-vectorstore = PineconeVectorStore(
-    index_name=PINECONE_INDEX_NAME, 
-    embedding=embeddings
-)
-retriever = vectorstore.as_retriever()
+    # --- First-time setup (will be slow on first request) ---
+    print("--- Initializing RAG chain (first request only) ---")
 
-# 3. Initialize LLM (The "Thinker")
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+    PINECONE_INDEX_NAME = "rag-framework" 
 
-# 4. Create a Prompt Template
-template = """
-You are an assistant. Answer the user's question based *only* on the following context.
-If you don't know the answer from the context, say 'I am not sure.'
+    # 1. Initialize Embedding Model
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-Context:
-{context}
+    # 2. Initialize Vector Store (the "Retriever")
+    vectorstore = PineconeVectorStore(
+        index_name=PINECONE_INDEX_NAME, 
+        embedding=embeddings
+    )
+    retriever = vectorstore.as_retriever()
 
-Question:
-{question}
-"""
-prompt = PromptTemplate.from_template(template)
+    # 3. Initialize LLM
+    llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
-# 5. Create the RAG "Chain"
-# This defines the flow of data for every request
+    # 4. Create a Prompt Template
+    template = """
+    You are an assistant. Answer the user's question based *only* on the following context.
+    If you don't know the answer from the context, say 'I am not sure.'
 
-rag_chain = (
-    {"context": retriever, "question": RunnablePassthrough()}
-    | prompt
-    | llm
-    | StrOutputParser()
-)
+    Context:
+    {context}
+
+    Question:
+    {question}
+    """
+    prompt = PromptTemplate.from_template(template)
+
+    # 5. Create and cache the RAG "Chain"
+    rag_chain = (
+        {"context": retriever, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    print("--- RAG chain initialized successfully ---")
+    return rag_chain
 
 # --- API ---
 
@@ -72,7 +89,13 @@ def read_root():
 def chat_with_rag(request: ChatRequest):
     # .invoke() runs the entire chain with the user's question
     try:
-        response = rag_chain.invoke(request.question)
+        # This will initialize the chain on the first call,
+        # and re-use the cached chain on subsequent calls.
+        chain = get_rag_chain()
+        response = chain.invoke(request.question)
         return {"answer": response}
     except Exception as e:
+        # This will catch the *real* error (like "index not found")
+        # and return it as a JSON, so we can debug it.
+        print(f"Error during RAG chain invocation: {e}")
         return {"answer": f"An error occurred: {str(e)}"}
