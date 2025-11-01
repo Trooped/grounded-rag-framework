@@ -120,11 +120,12 @@ async def stream_chat(request: ChatRequest):
         # 4. Use .astream() to get chunks as they are generated
         async for chunk in rag_chain.astream(request.question):
             if chunk:
-                yield chunk
+                yield {"data": chunk}
 
     except Exception as e:
         print(f"Error during RAG stream: {e}")
-        yield f"Error: {str(e)}"
+        # Also send the error in the correct format
+        yield {"data": f"Error: {str(e)}"}
 
 # --- Endpoints ---
 @app.get("/")
