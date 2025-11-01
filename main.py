@@ -17,7 +17,7 @@ load_dotenv()
 # --- Setup ---
 # This setup code will run once when your API server starts on Render
 
-PINECONE_INDEX_NAME = "rag-demo" # Your index name
+PINECONE_INDEX_NAME = "rag-framework" # Your index name
 
 # 1. Initialize Embedding Model
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
