@@ -114,13 +114,13 @@ async def stream_chat(request: ChatRequest):
             {"context": retriever, "question": RunnablePassthrough()}
             | prompt
             | llm
-            | StrOutputParser()
         )
 
         # 4. Use .astream() to get chunks as they are generated
         async for chunk in rag_chain.astream(request.question):
-            if chunk:
-                yield {"data": chunk}
+            # The 'content' attribute of the chunk contains the actual text, including spaces.
+            if chunk.content:
+                yield {"data": chunk.content}
 
     except Exception as e:
         print(f"Error during RAG stream: {e}")
